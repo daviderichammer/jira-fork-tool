@@ -164,6 +164,32 @@ class StateManager:
             row = cursor.fetchone()
             return dict(row) if row else None
     
+    def get_all_sync_sessions(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all sync sessions, optionally filtered by status.
+        
+        Args:
+            status: Optional filter for session status ('running', 'completed', 'failed')
+            
+        Returns:
+            List of sync session dictionaries
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            if status:
+                cursor = conn.execute('''
+                    SELECT * FROM sync_sessions 
+                    WHERE status = ?
+                    ORDER BY start_time DESC
+                ''', (status,))
+            else:
+                cursor = conn.execute('''
+                    SELECT * FROM sync_sessions 
+                    ORDER BY start_time DESC
+                ''')
+            
+            return [dict(row) for row in cursor.fetchall()]
+    
     def get_last_successful_sync(self) -> Optional[Dict[str, Any]]:
         """Get the last successful sync session."""
         with sqlite3.connect(self.db_path) as conn:
@@ -215,6 +241,105 @@ class StateManager:
         """Save user mapping data."""
         # Implementation would store user mapping
         pass
+    
+    def add_issue_mapping(self, source_key: str, dest_key: str, sync_id: Optional[str] = None) -> None:
+        """Add a mapping between source and destination issue keys.
+        
+        Args:
+            source_key: The issue key in the source project
+            dest_key: The issue key in the destination project
+            sync_id: Optional sync session ID. If not provided, uses the latest active session.
+        """
+        if not sync_id:
+            # Get the latest active sync session
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute('''
+                    SELECT sync_id FROM sync_sessions 
+                    WHERE status = 'running'
+                    ORDER BY start_time DESC
+                    LIMIT 1
+                ''')
+                row = cursor.fetchone()
+                if not row:
+                    logging.error("No active sync session found for issue mapping")
+                    return
+                sync_id = row['sync_id']
+        
+        # Insert or replace the mapping
+        with sqlite3.connect(self.db_path) as conn:
+            try:
+                conn.execute('''
+                    INSERT OR REPLACE INTO issue_mappings 
+                    (sync_id, source_key, dest_key)
+                    VALUES (?, ?, ?)
+                ''', (sync_id, source_key, dest_key))
+                logging.info(f"Mapped {source_key} to {dest_key} in sync {sync_id}")
+            except sqlite3.Error as e:
+                logging.error(f"Failed to add issue mapping: {e}")
+    
+    def get_issue_mapping(self, sync_id: str) -> Dict[str, str]:
+        """Get all issue mappings for a sync session.
+        
+        Args:
+            sync_id: The sync session ID
+            
+        Returns:
+            A dictionary mapping source keys to destination keys
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT source_key, dest_key FROM issue_mappings 
+                WHERE sync_id = ?
+            ''', (sync_id,))
+            
+            return {row['source_key']: row['dest_key'] for row in cursor.fetchall()}
+    
+    def get_all_issue_mappings(self) -> Dict[str, str]:
+        """Get all issue mappings across all sync sessions.
+        
+        Returns:
+            A dictionary mapping source keys to destination keys
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute('''
+                SELECT source_key, dest_key FROM issue_mappings
+                ORDER BY timestamp DESC
+            ''')
+            
+            # Use a dictionary to ensure we get the latest mapping for each source key
+            mappings = {}
+            for row in cursor.fetchall():
+                if row['source_key'] not in mappings:
+                    mappings[row['source_key']] = row['dest_key']
+            
+            return mappings
+    
+    def save_issue_mapping(self, sync_id: str, mapping: Dict[str, str]) -> None:
+        """Save multiple issue mappings at once.
+        
+        Args:
+            sync_id: The sync session ID
+            mapping: Dictionary mapping source keys to destination keys
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            try:
+                # Prepare data for bulk insert
+                data = [(sync_id, source_key, dest_key) 
+                        for source_key, dest_key in mapping.items()]
+                
+                # Use executemany for better performance
+                conn.executemany('''
+                    INSERT OR REPLACE INTO issue_mappings 
+                    (sync_id, source_key, dest_key)
+                    VALUES (?, ?, ?)
+                ''', data)
+                
+                logging.info(f"Saved {len(mapping)} issue mappings for sync {sync_id}")
+            except sqlite3.Error as e:
+                logging.error(f"Failed to save issue mappings: {e}")
 
 
 class ProgressTracker:
@@ -256,4 +381,3 @@ class ProgressTracker:
         self.phase_progress = 0
         self.phase_total = 0
         self.start_time = None
-
