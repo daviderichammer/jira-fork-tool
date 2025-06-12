@@ -422,8 +422,7 @@ class JiraAPI:
             return all_links
             
         except Exception as e:
-            logger.error(f"Failed to get issue links: {e}")
-            return []
+            raise APIError(f"Failed to get issue links: {e}")
     
     def get_all_epic_links(self, issue_keys: List[str]) -> List[Dict[str, Any]]:
         """Get all epic links for a list of issues."""
@@ -444,9 +443,11 @@ class JiraAPI:
                 logger.warning("Epic Link field not found")
                 return []
             
-            # Query each issue for its epic link
+            # Get epic links for each issue
             for key in issue_keys:
-                response = self.session.get(f"{self.base_url}/issue/{key}?fields={epic_link_field}")
+                response = self.session.get(
+                    f"{self.base_url}/issue/{key}?fields={epic_link_field}"
+                )
                 if not response.ok:
                     continue
                 
@@ -465,109 +466,122 @@ class JiraAPI:
             return all_epic_links
             
         except Exception as e:
-            logger.error(f"Failed to get epic links: {e}")
-            return []
+            raise APIError(f"Failed to get epic links: {e}")
     
-    def update_issue(self, issue_key: str, issue_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Update an existing issue."""
+    def get_all_subtasks(self, issue_keys: List[str]) -> List[Dict[str, Any]]:
+        """Get all subtask relationships for a list of issues.
+        
+        Args:
+            issue_keys: List of issue keys to check for subtask relationships
+            
+        Returns:
+            List of dictionaries with parent_key and subtask_key
+        """
         try:
+            all_subtasks = []
+            
+            # Get subtasks for each issue
+            for key in issue_keys:
+                response = self.session.get(
+                    f"{self.base_url}/issue/{key}?fields=subtasks,parent"
+                )
+                if not response.ok:
+                    continue
+                
+                issue_data = response.json()
+                
+                # Check if this issue has subtasks
+                subtasks = issue_data.get('fields', {}).get('subtasks', [])
+                for subtask in subtasks:
+                    all_subtasks.append({
+                        'parent_key': key,
+                        'subtask_key': subtask['key']
+                    })
+                
+                # Check if this issue is a subtask itself
+                parent = issue_data.get('fields', {}).get('parent')
+                if parent:
+                    all_subtasks.append({
+                        'parent_key': parent['key'],
+                        'subtask_key': key
+                    })
+                
+                # Rate limiting
+                time.sleep(0.1)
+            
+            return all_subtasks
+            
+        except Exception as e:
+            raise APIError(f"Failed to get subtasks: {e}")
+    
+    def create_subtask_relationship(self, parent_key: str, subtask_key: str) -> Dict[str, Any]:
+        """Create a subtask relationship between a parent issue and a subtask.
+        
+        Args:
+            parent_key: The parent issue key
+            subtask_key: The subtask issue key
+            
+        Returns:
+            Dictionary with success status
+        """
+        try:
+            # Update the subtask with the parent reference
+            update_data = {
+                'fields': {
+                    'parent': {
+                        'key': parent_key
+                    }
+                }
+            }
+            
             response = self.session.put(
-                f"{self.base_url}/issue/{issue_key}",
-                json=issue_data
+                f"{self.base_url}/issue/{subtask_key}",
+                json=update_data
             )
             self._handle_response(response)
             return {'success': True}
             
         except Exception as e:
-            raise APIError(f"Failed to update issue: {e}")
-    
-    def add_attachment(self, issue_key: str, filename: str, content: bytes) -> Dict[str, Any]:
-        """Add an attachment to an issue."""
-        try:
-            headers = {
-                'X-Atlassian-Token': 'no-check'
-            }
-            
-            files = {
-                'file': (filename, content)
-            }
-            
-            response = self.session.post(
-                f"{self.base_url}/issue/{issue_key}/attachments",
-                headers=headers,
-                files=files
-            )
-            self._handle_response(response)
-            return response.json()[0]
-            
-        except Exception as e:
-            raise APIError(f"Failed to add attachment: {e}")
-    
-    def download_attachment(self, attachment_id: str) -> bytes:
-        """Download an attachment by ID."""
-        try:
-            response = self.session.get(f"{self.base_url}/attachment/content/{attachment_id}")
-            self._handle_response(response)
-            return response.content
-            
-        except Exception as e:
-            raise APIError(f"Failed to download attachment: {e}")
-    
-    def add_comment(self, issue_key: str, comment_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Add a comment to an issue."""
-        try:
-            response = self.session.post(
-                f"{self.base_url}/issue/{issue_key}/comment",
-                json=comment_data
-            )
-            self._handle_response(response)
-            return response.json()
-            
-        except Exception as e:
-            raise APIError(f"Failed to add comment: {e}")
+            raise APIError(f"Failed to create subtask relationship: {e}")
     
     def get_issue_link_types(self) -> List[Dict[str, Any]]:
-        """Get all available issue link types."""
+        """Get all available issue link types.
+        
+        Returns:
+            List of link type dictionaries
+        """
         try:
             response = self.session.get(f"{self.base_url}/issueLinkType")
             self._handle_response(response)
             
-            link_types = []
-            for link_type in response.json().get('issueLinkTypes', []):
-                link_types.append({
-                    'id': link_type.get('id'),
-                    'name': link_type.get('name'),
-                    'inward': link_type.get('inward'),
-                    'outward': link_type.get('outward')
-                })
-            
-            return link_types
+            return response.json().get('issueLinkTypes', [])
             
         except Exception as e:
             logger.error(f"Failed to get issue link types: {e}")
             # Return a minimal set of default link types to avoid blocking the process
             return [
-                {'id': '10000', 'name': 'Relates', 'inward': 'relates to', 'outward': 'relates to'},
-                {'id': '10001', 'name': 'Blocks', 'inward': 'is blocked by', 'outward': 'blocks'}
+                {
+                    'id': '10000',
+                    'name': 'Blocks',
+                    'inward': 'is blocked by',
+                    'outward': 'blocks'
+                },
+                {
+                    'id': '10001',
+                    'name': 'Relates',
+                    'inward': 'relates to',
+                    'outward': 'relates to'
+                }
             ]
     
     def _handle_response(self, response: requests.Response) -> None:
         """Handle API response and raise appropriate exceptions."""
         if response.status_code == 429:
-            retry_after = response.headers.get('Retry-After', '60')
-            raise RateLimitError(f"Rate limit exceeded. Retry after {retry_after} seconds.")
+            retry_after = int(response.headers.get('Retry-After', 60))
+            logger.warning(f"Rate limit exceeded. Retry after {retry_after} seconds.")
+            time.sleep(retry_after)
+            raise RateLimitError(f"Rate limit exceeded: {response.text}")
         
         if not response.ok:
-            error_message = f"HTTP {response.status_code}"
-            try:
-                error_data = response.json()
-                if 'errorMessages' in error_data and error_data['errorMessages']:
-                    error_message += f": {error_data['errorMessages'][0]}"
-                elif 'errors' in error_data and error_data['errors']:
-                    first_error = next(iter(error_data['errors'].items()))
-                    error_message += f": {first_error[0]}"
-            except:
-                if response.text:
-                    error_message += f": {response.text[:100]}"
-            
-            response.raise_for_status()
+            logger.error(f"API error: {response.status_code} - {response.text}")
+            raise APIError(f"API error: {response.status_code} - {response.text}")
